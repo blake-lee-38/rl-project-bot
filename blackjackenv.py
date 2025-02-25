@@ -110,7 +110,7 @@ class BlackjackEnv(gym.Env):
                 reward = -1.0
             else:
                 terminated = False
-                reward = 0.0
+                reward = 0.1
 
         else:  # stick
 
@@ -152,6 +152,9 @@ class BlackjackEnv(gym.Env):
         
         # Deal new hands to dealer and player
         super().reset(seed=seed)
+        if options and options['full_reset']:
+            self.cumulative_reward = 0
+            self.shuffle_shoe()
         self.dealer = self.draw_hand(True)
         self.player = self.draw_hand(False)
 

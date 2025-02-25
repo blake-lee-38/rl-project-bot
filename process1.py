@@ -29,7 +29,7 @@ print(f"Initial Hand: {obs}, Info: {info}")
 # Play Hands
 while hands:
     # Simple strategy: Adjusted by RL based on count, cards, and dealer's card
-    action = 1 if  obs[0] < 16 else 0
+    action = 1 if  obs[0] < 15 else 0
 
     # Take action and observe new state and reward
     obs, reward, done, truncated, info = env.step(action)
@@ -47,6 +47,10 @@ while hands:
         # Playing around with adjusted betting strategy (Also RL based)
         if total < 100:
             bet *= 2
+        elif total > 100:
+            bet = 10
+        elif total < 0:
+            break
 
         # Deal New Hand
         print("-------")

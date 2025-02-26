@@ -7,15 +7,15 @@ Key updates:
   - The training loop runs indefinitely until manually stopped.
   - A Pause/Play button (in the top-left section) pauses/resumes training.
   - A Stop button (in the top-left section) stops training, saves a screenshot and final summary log
-    (with filenames formatted as {mm-dd}_{hh-mm}_{episode}_{last100_avg}), and then closes the program.
+    (with filenames formatted as {mm-dd}_{hh-mm}_{episode}_{recent_avg}), and then closes the program.
   - The top stats area is split into three side-by-side sections:
       • Section 1 (Header): Displays the episode number and control buttons.
-      • Section 2 (Stats): Displays Total Moving Avg, Last 100 Avg, Epsilon, and Best Reward.
-      • Section 3 (Wins): Displays global win/loss stats and last 100 win ratio.
+      • Section 2 (Stats): Displays Total Moving Avg, Recent Avg, Epsilon, and Best Reward.
+      • Section 3 (Wins): Displays Lifetime win/loss stats and recent win ratio.
   - Console output and UI updates occur only at intervals:
       • Every 100 episodes until 2500,
       • Every 500 episodes from 2500 to 10000,
-      • Every 1000 episodes from 10000 to 25000, etc.
+      • Every 1000 episodes thereafter.
   - When training stops (via the Stop button or window close), a screenshot and summary file are saved in the "results" folder.
 
 --- Additional Reward Shaping Suggestions ---
@@ -35,8 +35,8 @@ from collections import defaultdict
 import os
 from datetime import datetime
 from PIL import ImageGrab  # Requires Pillow
+import argparse  # Add this at the top with other imports
 
-# Import the environment using its proper name.
 from advanced_blackjack_env import AdvancedBlackjackEnv
 
 # ----- State Discretization and Action Selection Helpers -----
@@ -111,21 +111,22 @@ def get_print_interval(episode):
     elif episode < 10000:
         return 500
     else:
-        return 1000  # Cap at 1000 episodes max interval
+        return 1000
 
 # ----- Global Control Flags and Results Folder Setup -----
 pause_event = threading.Event()  # When set, training is paused.
 stop_event = threading.Event()   # When set, training should stop.
 
-results_folder = "results"
+# Get the directory where the script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+results_folder = os.path.join(script_dir, "results")
 if not os.path.exists(results_folder):
     os.makedirs(results_folder)
 
 # ----- Tkinter UI Setup -----
 root = tk.Tk()
 root.title("Q-Learning Training Progress")
-# Position the window at (20,20) with a size of 800x950.
-root.geometry("800x950+20+20")
+root.geometry("800x950+20+20")  # 800x950 size at position (20,20)
 
 # Top stats frame with 3 side-by-side sections.
 stats_frame = tk.Frame(root)
@@ -154,13 +155,13 @@ def stop_training():
 stop_button = tk.Button(control_buttons_frame, text="Stop", command=stop_training)
 stop_button.pack(side=tk.LEFT, padx=5)
 
-# Section 2: Left Stats (Performance metrics)
+# Section 2: Left Stats (Performance metrics; "Recent" instead of "Last 100")
 left_stats_frame = tk.Frame(stats_frame)
 left_stats_frame.grid(row=0, column=1, padx=20, sticky="w")
 left_stats_label = tk.Label(left_stats_frame, text="", font=("Helvetica", 12), justify=tk.LEFT)
 left_stats_label.pack(anchor="w")
 
-# Section 3: Right Stats (Win/Loss metrics)
+# Section 3: Right Stats (Win/Loss metrics; "Lifetime" instead of "Global")
 right_stats_frame = tk.Frame(stats_frame)
 right_stats_frame.grid(row=0, column=2, sticky="w")
 right_stats_label = tk.Label(right_stats_frame, text="", font=("Helvetica", 12), justify=tk.LEFT)
@@ -181,6 +182,12 @@ canvas_epsilon.pack(pady=10)
 # Lower frame for the action probability table.
 lower_frame = tk.Frame(charts_frame)
 lower_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+# Add parameters label between epsilon graph and action table
+params_label = tk.Label(lower_frame, text=f"α: {ALPHA:.3f}  γ: {GAMMA:.3f}  Decay: {EPSILON_DECAY:.5f}", 
+                       font=("Helvetica", 8, "italic"))
+params_label.pack(pady=(0, 5))
+
 canvas_action_table = tk.Canvas(lower_frame, width=760, height=300, bg="white")
 canvas_action_table.pack(pady=10)
 
@@ -189,36 +196,36 @@ ui_data = {
     "episode": 0,
     "ep_reward": 0.0,
     "total_avg": 0.0,
-    "last100_avg": 0.0,
+    "recent_avg": 0.0,  # Renamed from last100_avg to recent_avg
     "epsilon": EPSILON,
     "best_reward": -float('inf'),
-    "wins": 0,
-    "losses": 0,
+    "wins": 0,         # Lifetime wins
+    "losses": 0,       # Lifetime losses
     "ties": 0,
     "episodes": [],
     "total_avgs": [],
-    "last100_avgs": [],
+    "recent_avgs": [],  # Renamed accordingly
     "epsilons": [],
     "best_rewards": []
 }
-recent_rewards = []  # To track recent episode outcomes (for last 100 metrics).
+recent_rewards = []  # This will track episodes since the last UI update.
 
 def update_text():
     header_text = f"Episode: {ui_data['episode']}"
     left_text = (f"Total Moving Avg: {ui_data['total_avg']:.2f}\n"
-                 f"Last 100 Avg: {ui_data['last100_avg']:.2f}\n"
+                 f"Recent Avg: {ui_data['recent_avg']:.2f}\n"
                  f"Epsilon: {ui_data['epsilon']:.3f}\n"
                  f"Best Reward: {ui_data['best_reward']:.2f}")
-    global_win_ratio = (ui_data["wins"] / (ui_data["wins"] + ui_data["losses"]) * 100
-                        if (ui_data["wins"] + ui_data["losses"]) > 0 else 0)
-    last100_wins = sum(1 for r in recent_rewards if r > 0)
-    last100_losses = sum(1 for r in recent_rewards if r < 0)
-    last100_total = last100_wins + last100_losses
-    last100_win_ratio = (last100_wins / last100_total * 100) if last100_total > 0 else 0
-    right_text = (f"Global Wins: {ui_data['wins']}  Losses: {ui_data['losses']}\n"
-                  f"Global Win Ratio: {global_win_ratio:.1f}%\n"
-                  f"Last 100 Wins: {last100_wins}  Losses: {last100_losses}\n"
-                  f"Last 100 Win Ratio: {last100_win_ratio:.0f}%")
+    lifetime_win_ratio = (ui_data["wins"] / (ui_data["wins"] + ui_data["losses"]) * 100
+                          if (ui_data["wins"] + ui_data["losses"]) > 0 else 0)
+    recent_wins = sum(1 for r in recent_rewards if r > 0)
+    recent_losses = sum(1 for r in recent_rewards if r < 0)
+    recent_total = recent_wins + recent_losses
+    recent_win_ratio = (recent_wins / recent_total * 100) if recent_total > 0 else 0
+    right_text = (f"Lifetime Wins: {ui_data['wins']}  Losses: {ui_data['losses']}\n"
+                  f"Lifetime Win Ratio: {lifetime_win_ratio:.1f}%\n"
+                  f"Recent Wins: {recent_wins}  Losses: {recent_losses}\n"
+                  f"Recent Win Ratio: {recent_win_ratio:.0f}%")
     
     header_label.config(text=header_text)
     left_stats_label.config(text=left_text)
@@ -255,31 +262,66 @@ def draw_chart(canvas, episodes, series1, series2, label1, label2):
     w = int(canvas["width"])
     h = int(canvas["height"])
     margin = 40
-    x_min = min(episodes)
-    x_max = max(episodes)
+    
+    if not episodes:
+        return
+        
+    # Create 10 interpolated points between each update interval
+    points1 = []
+    points2 = []
+    for i in range(len(episodes)-1):
+        ep_start = episodes[i]
+        ep_end = episodes[i+1]
+        val1_start = series1[i]
+        val1_end = series1[i+1]
+        val2_start = series2[i]
+        val2_end = series2[i+1]
+        
+        # Create 10 points for this interval
+        for j in range(10):
+            t = j / 10
+            ep = ep_start + (ep_end - ep_start) * t
+            val1 = val1_start + (val1_end - val1_start) * t
+            val2 = val2_start + (val2_end - val2_start) * t
+            points1.append((ep, val1))
+            points2.append((ep, val2))
+    
+    # Add the final point
+    if episodes:
+        points1.append((episodes[-1], series1[-1]))
+        points2.append((episodes[-1], series2[-1]))
+    
+    x_min = episodes[0] if episodes else 0
+    x_max = episodes[-1] if episodes else 1
     y_min_data = min(min(series1), min(series2))
     y_max_data = max(max(series1), max(series2))
     y_range = max(100, max(abs(y_min_data), abs(y_max_data)))
     y_min = -y_range
     y_max = y_range
+    
     draw_grid(canvas, x_min, x_max, y_min, y_max, margin=margin, num_grid=10)
     
     def scale_x(x):
         return margin + (x - x_min) / (x_max - x_min) * (w - 2 * margin) if x_max != x_min else margin
     def scale_y(y):
         return h - margin - ((y - y_min) / (y_max - y_min)) * (h - 2 * margin) if y_max != y_min else h/2
-    for i in range(1, len(episodes)):
-        x1 = scale_x(episodes[i-1])
-        y1 = scale_y(series1[i-1])
-        x2 = scale_x(episodes[i])
-        y2 = scale_y(series1[i])
+    
+    # Draw interpolated lines for series1 (blue)
+    for i in range(1, len(points1)):
+        x1 = scale_x(points1[i-1][0])
+        y1 = scale_y(points1[i-1][1])
+        x2 = scale_x(points1[i][0])
+        y2 = scale_y(points1[i][1])
         canvas.create_line(x1, y1, x2, y2, fill="blue", width=2)
-    for i in range(1, len(episodes)):
-        x1 = scale_x(episodes[i-1])
-        y1 = scale_y(series2[i-1])
-        x2 = scale_x(episodes[i])
-        y2 = scale_y(series2[i])
+    
+    # Draw interpolated lines for series2 (orange)
+    for i in range(1, len(points2)):
+        x1 = scale_x(points2[i-1][0])
+        y1 = scale_y(points2[i-1][1])
+        x2 = scale_x(points2[i][0])
+        y2 = scale_y(points2[i][1])
         canvas.create_line(x1, y1, x2, y2, fill="orange", width=2)
+    
     canvas.create_text(margin + 20, margin - 10, text=label1, fill="blue", font=("Helvetica", 10))
     canvas.create_text(margin + 150, margin - 10, text=label2, fill="orange", font=("Helvetica", 10))
 
@@ -290,6 +332,25 @@ def draw_epsilon_chart(canvas, episodes, epsilons):
     margin = 40
     if not episodes:
         return
+        
+    # Create interpolated points
+    points = []
+    for i in range(len(episodes)-1):
+        ep_start = episodes[i]
+        ep_end = episodes[i+1]
+        eps_start = epsilons[i]
+        eps_end = epsilons[i+1]
+        
+        # Create 10 points for this interval
+        for j in range(10):
+            t = j / 10
+            ep = ep_start + (ep_end - ep_start) * t
+            eps = eps_start + (eps_end - eps_start) * t
+            points.append((ep, eps))
+    
+    # Add the final point
+    points.append((episodes[-1], epsilons[-1]))
+    
     x_min = episodes[0]
     x_max = episodes[-1]
     y_min = 0
@@ -300,11 +361,15 @@ def draw_epsilon_chart(canvas, episodes, epsilons):
         return margin + (x - x_min) / (x_max - x_min) * (w - 2 * margin) if x_max != x_min else margin
     def scale_y(y):
         return h - margin - ((y - y_min) / (y_max - y_min)) * (h - 2 * margin) if y_max != y_min else h/2
-    x1 = scale_x(episodes[0])
-    y1 = scale_y(epsilons[0])
-    x2 = scale_x(episodes[-1])
-    y2 = scale_y(epsilons[-1])
-    canvas.create_line(x1, y1, x2, y2, fill="green", width=2)
+    
+    # Draw interpolated lines
+    for i in range(1, len(points)):
+        x1 = scale_x(points[i-1][0])
+        y1 = scale_y(points[i-1][1])
+        x2 = scale_x(points[i][0])
+        y2 = scale_y(points[i][1])
+        canvas.create_line(x1, y1, x2, y2, fill="green", width=2)
+    
     for mark in [0, 0.5, 1]:
         y = scale_y(mark)
         canvas.create_line(margin, y, w - margin, y, fill="gray", dash=(2, 2))
@@ -345,7 +410,7 @@ def draw_action_probability_table(canvas, aggregated_action_data):
     for col, hand_sum in enumerate(sorted_hand_sums):
         x = margin_left + col * cell_width + cell_width/2
         canvas.create_text(x, margin_top - 15, text=str(hand_sum), font=("Helvetica", 10))
-    canvas.create_text((w+margin_left-margin_right)/2, 15, text="Hand Sum vs Action Probability (Last 100 Episodes)", font=("Helvetica", 12, "bold"))
+    canvas.create_text((w+margin_left-margin_right)/2, 15, text="Hand Sum vs Action Probability (Recent Episodes)", font=("Helvetica", 12, "bold"))
     action_labels = ["Hit", "Stick", "Double Down", "Split"]
     for row, label in enumerate(action_labels):
         y = margin_top + row * cell_height + cell_height/2
@@ -353,8 +418,8 @@ def draw_action_probability_table(canvas, aggregated_action_data):
 
 def update_tk_ui(aggregated_action_data):
     update_text()
-    draw_chart(canvas_chart, ui_data["episodes"], ui_data["total_avgs"], ui_data["last100_avgs"],
-               "Total Moving Avg", "Last 100 Avg")
+    draw_chart(canvas_chart, ui_data["episodes"], ui_data["total_avgs"], ui_data["recent_avgs"],
+               "Total Moving Avg", "Recent Avg")
     draw_epsilon_chart(canvas_epsilon, ui_data["episodes"], ui_data["epsilons"])
     draw_action_probability_table(canvas_action_table, aggregated_action_data)
     root.update_idletasks()
@@ -367,7 +432,23 @@ def shape_reward(reward):
     else:
         return reward
 
-def train_agent():
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train Q-Learning Agent for Blackjack')
+    parser.add_argument('--alpha', type=float, default=0.1,
+                       help='Learning rate (default: 0.1)')
+    parser.add_argument('--gamma', type=float, default=0.95,
+                       help='Discount factor (default: 0.95)')
+    parser.add_argument('--epsilon-decay', type=float, default=0.99975,
+                       help='Epsilon decay rate (default: 0.99975)')
+    parser.add_argument('--episodes', type=int, default=None,
+                       help='Number of episodes to train (default: None, runs indefinitely)')
+    parser.add_argument('--no-ui', action='store_true',
+                       help='Disable UI and run in console mode')
+    parser.add_argument('--quiet', action='store_true',
+                       help='Disable console output')
+    return parser.parse_args()
+
+def train_agent(args):
     global EPSILON
     env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=100)
     best_reward = -float('inf')
@@ -378,8 +459,11 @@ def train_agent():
     episode_counter = 0
     action_stats_per_episode = []
     
-    # Run indefinitely until stop_event is set.
     while not stop_event.is_set():
+        if args.episodes and episode_counter >= args.episodes:
+            stop_event.set()
+            break
+            
         while pause_event.is_set() and not stop_event.is_set():
             time.sleep(0.1)
         
@@ -416,11 +500,9 @@ def train_agent():
         action_stats_per_episode.append(episode_action_stats)
         episode_counter += 1
         recent_rewards.append(total_reward)
-        window_size = 100 if episode_counter >= 100 else episode_counter
-        if len(recent_rewards) > window_size:
-            recent_rewards = recent_rewards[-window_size:]
+        # Use all episodes since last UI update.
+        recent_avg = np.mean(recent_rewards) if recent_rewards else 0.0
         total_moving_avg = (total_moving_avg * (episode_counter - 1) + total_reward) / episode_counter
-        last100_avg = np.mean(recent_rewards)
         best_reward = max(best_reward, total_reward)
         
         EPSILON = max(EPSILON * EPSILON_DECAY, EPSILON_MIN)
@@ -437,26 +519,33 @@ def train_agent():
             ui_data["episode"] = episode_counter
             ui_data["ep_reward"] = total_reward
             ui_data["total_avg"] = total_moving_avg
-            ui_data["last100_avg"] = last100_avg
+            ui_data["recent_avg"] = recent_avg
             ui_data["epsilon"] = EPSILON
             ui_data["best_reward"] = best_reward
             ui_data["episodes"].append(episode_counter)
             ui_data["total_avgs"].append(total_moving_avg)
-            ui_data["last100_avgs"].append(last100_avg)
+            ui_data["recent_avgs"].append(recent_avg)
             ui_data["epsilons"].append(EPSILON)
             ui_data["best_rewards"].append(best_reward)
             aggregated_action_data = {}
-            for ep_stats in action_stats_per_episode[-100:]:
+            for ep_stats in action_stats_per_episode[-interval:]:
                 for hand_sum, counts in ep_stats.items():
                     if hand_sum not in aggregated_action_data:
                         aggregated_action_data[hand_sum] = [0, 0, 0, 0]
                     for i in range(4):
                         aggregated_action_data[hand_sum][i] += counts[i]
-            update_tk_ui(aggregated_action_data)
-            print(f"Episode {episode_counter} | Reward: {total_reward:.2f} | Total Avg: {total_moving_avg:.2f} | "
-                  f"Last100 Avg: {last100_avg:.2f} | Epsilon: {EPSILON:.3f} | Best: {best_reward:.2f}")
+            
+            if not args.no_ui:
+                update_tk_ui(aggregated_action_data)
+            
+            if not args.quiet:
+                print(f"Episode {episode_counter} | Reward: {total_reward:.2f} | Total Avg: {total_moving_avg:.2f} | "
+                      f"Recent Avg: {recent_avg:.2f} | Epsilon: {EPSILON:.3f} | Best: {best_reward:.2f}")
+            
+            recent_rewards.clear()
     
-    print("Training complete.")
+    if not args.quiet:
+        print("Training complete.")
     root.quit()
 
 def save_screenshot_and_summary():
@@ -470,24 +559,38 @@ def save_screenshot_and_summary():
     now = datetime.now()
     date_str = now.strftime("%m-%d")
     time_str = now.strftime("%H-%M")
-    screenshot_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['last100_avg']:.2f}.png")
+    screenshot_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['recent_avg']:.2f}.png")
     screenshot.save(screenshot_filename)
     print(f"Saved screenshot: {screenshot_filename}")
     
-    summary_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['last100_avg']:.2f}.txt")
+    summary_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['recent_avg']:.2f}.txt")
     with open(summary_filename, "w") as f:
         f.write(f"Final Episode: {ui_data['episode']}\n")
         f.write(f"Total Moving Avg: {ui_data['total_avg']:.2f}\n")
-        f.write(f"Last 100 Avg: {ui_data['last100_avg']:.2f}\n")
+        f.write(f"Recent Avg: {ui_data['recent_avg']:.2f}\n")
         f.write(f"Epsilon: {ui_data['epsilon']:.3f}\n")
         f.write(f"Best Reward: {ui_data['best_reward']:.2f}\n")
-        f.write(f"Global Wins: {ui_data['wins']}  Losses: {ui_data['losses']}\n")
+        f.write(f"Lifetime Wins: {ui_data['wins']}  Losses: {ui_data['losses']}\n")
     print(f"Saved final summary: {summary_filename}")
 
 def main():
-    training_thread = threading.Thread(target=train_agent, daemon=True)
-    training_thread.start()
-    root.mainloop()
+    args = parse_args()
+    global ALPHA, GAMMA, EPSILON_DECAY
+    ALPHA = args.alpha
+    GAMMA = args.gamma
+    EPSILON_DECAY = args.epsilon_decay
+    
+    if args.no_ui:
+        # Run without UI
+        env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=100)
+        training_thread = threading.Thread(target=train_agent, args=(args,), daemon=True)
+        training_thread.start()
+        training_thread.join()  # Wait for training to complete
+    else:
+        # Run with UI
+        training_thread = threading.Thread(target=train_agent, args=(args,), daemon=True)
+        training_thread.start()
+        root.mainloop()
 
 if __name__ == "__main__":
     main()

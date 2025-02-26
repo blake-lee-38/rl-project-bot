@@ -1,0 +1,6 @@
+Final Episode: 51000
+Total Moving Avg: -86.47
+Recent Avg: -32.36
+Epsilon: 0.010
+Best Reward: 515.00
+Lifetime Wins: 14579  Losses: 35778

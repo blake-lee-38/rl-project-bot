@@ -210,11 +210,11 @@ def choose_action(state: tuple, phase: int, epsilon: float, episode: int, obs: d
     global args
     if phase == 0:  # Betting phase
         if episode < args.varied_bets_at and not varied_bets_enabled:
-            return 4  # Always bet 5 until varied_bets_at (changed from 9 to 4)
+            return 4  # Always bet 5 until varied_bets_at
         else:
             # Use epsilon-greedy for betting decisions
             if random.random() < EPSILON_BET:
-                return random.randint(0, 9)  # Random bet size
+                return random.randint(0, 9)  # Random bet size 0-9 (maps to 1-10)
             else:
                 q_vals = get_q(state, phase)
                 return int(np.argmax(q_vals))
@@ -558,6 +558,14 @@ def draw_action_probability_table(canvas, aggregated_action_data):
     cell_width = (w - margin_left - margin_right) / num_cols
     cell_height = (h - margin_top - margin_bottom) / num_rows
 
+    # Draw action labels on the left
+    action_labels = ["Hit", "Stand", "x2", "Split"]
+    for row, label in enumerate(action_labels):
+        y = margin_top + row * cell_height + cell_height/2
+        canvas.create_text(margin_left - 10, y, text=label, 
+                          font=("Helvetica", 10), anchor="e")
+
+    # Draw cells
     for col, hand_sum in enumerate(sorted_hand_sums):
         counts = aggregated_action_data[hand_sum]
         total = sum(counts)
@@ -570,6 +578,8 @@ def draw_action_probability_table(canvas, aggregated_action_data):
             y1 = y0 + cell_height
             canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="black")
             canvas.create_text((x0+x1)/2, (y0+y1)/2, text=f"{round(prob*100)}%", font=("Helvetica", 8))
+
+    # Draw hand sum labels at the top
     for col, hand_sum in enumerate(sorted_hand_sums):
         x = margin_left + col * cell_width + cell_width/2
         canvas.create_text(x, margin_top - 15, text=str(hand_sum), font=("Helvetica", 10))
@@ -585,7 +595,7 @@ def draw_betting_distribution_table(canvas, recent_betting_data):
 
     # Define count range and bet sizes
     count_range = range(-5, 6)  # -5 to +5
-    bet_sizes = range(1, 11)    # 1 to 10
+    bet_sizes = range(1, 11)    # 1 to 10 (inclusive)
     
     num_rows = len(count_range)
     num_cols = len(bet_sizes)
@@ -600,8 +610,10 @@ def draw_betting_distribution_table(canvas, recent_betting_data):
 
     # Draw cells
     for row, count in enumerate(count_range):
-        for col, bet in enumerate(bet_sizes):
-            prob = recent_betting_data.get((count, bet), 0)
+        for col, bet_size in enumerate(bet_sizes):
+            # Convert from 1-based bet size to 0-based action index
+            action = bet_size - 1
+            prob = recent_betting_data.get((count, action), 0)
             color = get_color_from_probability(prob)
             x0 = margin_left + col * cell_width
             y0 = margin_top + row * cell_height
@@ -611,9 +623,9 @@ def draw_betting_distribution_table(canvas, recent_betting_data):
             canvas.create_text((x0+x1)/2, (y0+y1)/2, text=f"{round(prob*100)}%", font=("Helvetica", 8))
 
     # Draw labels
-    for col, bet in enumerate(bet_sizes):
+    for col, bet_size in enumerate(bet_sizes):
         x = margin_left + col * cell_width + cell_width/2
-        canvas.create_text(x, margin_top - 15, text=str(bet), font=("Helvetica", 10))
+        canvas.create_text(x, margin_top - 15, text=str(bet_size), font=("Helvetica", 10))
     
     for row, count in enumerate(count_range):
         y = margin_top + row * cell_height + cell_height/2

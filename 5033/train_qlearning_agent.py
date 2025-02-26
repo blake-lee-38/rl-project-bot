@@ -446,11 +446,13 @@ def parse_args():
                        help='Disable UI and run in console mode')
     parser.add_argument('--quiet', action='store_true',
                        help='Disable console output')
+    parser.add_argument('--max-rounds', type=int, default=100,
+                       help='Number of rounds per episode (default: 100)')
     return parser.parse_args()
 
 def train_agent(args):
     global EPSILON
-    env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=100)
+    env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=args.max_rounds)
     best_reward = -float('inf')
     total_moving_avg = 0.0
     global recent_rewards
@@ -462,6 +464,8 @@ def train_agent(args):
     while not stop_event.is_set():
         if args.episodes and episode_counter >= args.episodes:
             stop_event.set()
+            if not args.no_ui:
+                save_screenshot_and_summary()
             break
             
         while pause_event.is_set() and not stop_event.is_set():
@@ -550,6 +554,9 @@ def train_agent(args):
 
 def save_screenshot_and_summary():
     root.update()
+
+    time.sleep(0.5)
+
     x = root.winfo_rootx()
     y = root.winfo_rooty()
     w = root.winfo_width()
@@ -582,7 +589,7 @@ def main():
     
     if args.no_ui:
         # Run without UI
-        env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=100)
+        env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=args.max_rounds)
         training_thread = threading.Thread(target=train_agent, args=(args,), daemon=True)
         training_thread.start()
         training_thread.join()  # Wait for training to complete

@@ -45,6 +45,7 @@ class AdvancedBlackjackEnv(gym.Env):
         self.bankroll = initial_bankroll
         self.max_rounds = max_rounds
         self.current_round = 0
+        self.count = 0  # Add running count
 
         # Build a standard deck.
         self.suits = ['C', 'D', 'H', 'S']
@@ -77,12 +78,16 @@ class AdvancedBlackjackEnv(gym.Env):
         """Construct and shuffle the shoe using num_decks decks."""
         self.shoe = self.single_deck * self.num_decks
         random.shuffle(self.shoe)
+        self.count = 0  # Reset count when shuffling
     
     def draw_card(self) -> Card:
         """Draw a card from the shoe; reshuffle if needed."""
         if len(self.shoe) < 52 * self.num_decks * 0.2:
             self.shuffle_shoe()
-        return self.shoe.pop()
+            self.count = 0  # Reset count after shuffle
+        card = self.shoe.pop()
+        self.update_count(card)  # Update count for each drawn card
+        return card
     
     def card_value(self, card: Card) -> int:
         """Return the blackjack value of a card. Face cards count as 10; Ace counts as 1 (can be 11 via sum_hand)."""
@@ -144,6 +149,14 @@ class AdvancedBlackjackEnv(gym.Env):
         self.player_hands.append(initial_hand)
         self.dealer = [self.draw_card(), self.draw_card()]
     
+    def update_count(self, card: Card) -> None:
+        """Update the running count based on the card."""
+        rank = card[1]
+        if rank in ['2','3','4','5','6']:
+            self.count += 1
+        elif rank in ['T','J','Q','K','A']:
+            self.count -= 1
+    
     def _get_obs(self) -> Dict[str, Any]:
         """
         Return an observation dictionary.
@@ -161,7 +174,8 @@ class AdvancedBlackjackEnv(gym.Env):
                 "usable_ace": False,
                 "dealer_card": None,
                 "hand_index": 0,
-                "total_hands": 0
+                "total_hands": 0,
+                "card_count": self.count  # Add count to observation
             }
         else:
             current_hand = self.player_hands[self.current_hand_index]["cards"]
@@ -175,9 +189,10 @@ class AdvancedBlackjackEnv(gym.Env):
                 "usable_ace": self.usable_ace(current_hand),
                 "dealer_card": self.dealer[0][0] + self.dealer[0][1] if self.dealer else None,
                 "hand_index": self.current_hand_index,
-                "total_hands": len(self.player_hands)
+                "total_hands": len(self.player_hands),
+                "card_count": self.count  # Add count to observation
             }
-            # Add flags for double down and split.
+            # Add flags for double down and split
             current_hand_data = self.player_hands[self.current_hand_index]
             cards = current_hand_data["cards"]
             can_double = (len(cards) == 2 and not current_hand_data["doubled"] and

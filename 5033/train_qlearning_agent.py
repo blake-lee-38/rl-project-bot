@@ -48,11 +48,14 @@ canvas_epsilon = None
 canvas_action_table = None
 canvas_betting_table = None
 varied_bets_enabled = False  # Global flag for varied bets status
+varied_bets_button = None
+auto_enable_label = None
+epsilon_label = None
 
 def create_ui(args):
-    global header_label, epsilon_label, left_stats_label, right_stats_label
+    global header_label, left_stats_label, right_stats_label, epsilon_label
     global canvas_chart, canvas_epsilon, canvas_action_table, canvas_betting_table
-    global varied_bets_button
+    global varied_bets_button, auto_enable_label
     
     # Create top section with 2x2 grid
     top_frame = tk.Frame(stats_frame)
@@ -144,8 +147,9 @@ def create_ui(args):
                                 font=("Helvetica", 9))
     auto_enable_label.pack(pady=(0,20))  # Added top and bottom padding
 
-    # Create the betting distribution table (initially hidden)
+    # Create the betting distribution table
     canvas_betting_table = tk.Canvas(betting_frame, width=760, height=400, bg="white")
+    canvas_betting_table.pack(pady=10)
 
 # ----- State Discretization and Action Selection Helpers -----
 def discretize_state(obs: dict) -> tuple:
@@ -308,6 +312,8 @@ ui_data = {
 recent_rewards = []  # This will track episodes since the last UI update.
 
 def update_text():
+    global epsilon_label  # Add global declaration
+    
     header_text = (f"Episode: {ui_data['episode']}")
     epsilon_text = (f"Play ε: {ui_data['epsilon_play']:.3f}  |  Bet ε: {ui_data['epsilon_bet']:.3f}")
     left_text = (f"Total Moving Avg: {ui_data['total_avg']:.2f}\n"
@@ -522,6 +528,9 @@ def draw_epsilon_chart(canvas, episodes, epsilons_play, epsilons_bet):
 
 def get_color_from_probability(prob):
     g = b = int(255 * (1 - prob))
+    # Ensure values are between 0 and 255
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
     return f"#{255:02x}{g:02x}{b:02x}"
 
 def draw_action_probability_table(canvas, aggregated_action_data):
@@ -631,23 +640,30 @@ def draw_betting_distribution_table(canvas, recent_betting_data):
         y = margin_top + row * cell_height + cell_height/2
         canvas.create_text(margin_left - 20, y, text=str(count), font=("Helvetica", 10))
 
-def update_tk_ui(aggregated_action_data, betting_distribution, args):
+def update_ui_elements(aggregated_action_data=None, betting_distribution=None, force_update=False):
+    """
+    Unified function to update all UI elements.
+    Set force_update=True to ensure all elements update even during screenshot.
+    """
+    # Update text elements
     update_text()
+    
+    # Update charts
     draw_chart(canvas_chart, ui_data["episodes"], ui_data["total_avgs"], ui_data["recent_avgs"],
                "Total Moving Avg", "Recent Avg")
     draw_epsilon_chart(canvas_epsilon, ui_data["episodes"], ui_data["epsilons_play"], ui_data["epsilons_bet"])
-    draw_action_probability_table(canvas_action_table, aggregated_action_data)
     
-    # Update betting section visibility
-    if varied_bets_enabled:
-        varied_bets_button.pack_forget()  # Hide button
-        canvas_betting_table.pack()       # Show table
+    # Update tables
+    if aggregated_action_data is not None:
+        draw_action_probability_table(canvas_action_table, aggregated_action_data)
+    if varied_bets_enabled and betting_distribution is not None:
         draw_betting_distribution_table(canvas_betting_table, betting_distribution)
-    else:
-        canvas_betting_table.pack_forget()  # Hide table
-        varied_bets_button.pack(pady=20)    # Show button
     
-    root.update_idletasks()
+    # Force immediate update if requested
+    if force_update:
+        root.update_idletasks()
+        root.update()
+        time.sleep(0.5)  # Wait for render
 
 def shape_reward(reward):
     if reward > 0:
@@ -679,14 +695,16 @@ def parse_args():
 
 def train_agent(args):
     global EPSILON_PLAY, EPSILON_BET, varied_bets_enabled
+    global action_stats_per_episode, betting_stats_per_episode  # Add global declaration
+    
     env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=args.max_rounds)
     best_reward = -float('inf')
     total_moving_avg = 0.0
     global recent_rewards
     recent_rewards.clear()
     episode_counter = 0
-    action_stats_per_episode = []
-    betting_stats_per_episode = []
+    action_stats_per_episode = []  # Initialize here
+    betting_stats_per_episode = []  # Initialize here
     
     # Reset epsilons at start of training
     EPSILON_PLAY = 1.0
@@ -770,6 +788,7 @@ def train_agent(args):
         
         interval = get_print_interval(episode_counter)
         if episode_counter % interval == 0:
+            # Update UI data
             ui_data["episode"] = episode_counter
             ui_data["ep_reward"] = total_reward
             ui_data["total_avg"] = total_moving_avg
@@ -783,6 +802,8 @@ def train_agent(args):
             ui_data["epsilons_play"].append(EPSILON_PLAY)
             ui_data["epsilons_bet"].append(EPSILON_BET)
             ui_data["best_rewards"].append(best_reward)
+
+            # Calculate aggregated data
             aggregated_action_data = {}
             for ep_stats in action_stats_per_episode[-interval:]:
                 for hand_sum, counts in ep_stats.items():
@@ -791,36 +812,40 @@ def train_agent(args):
                     for i in range(4):
                         aggregated_action_data[hand_sum][i] += counts[i]
             
-            # Collect betting distribution data from recent episodes
-            recent_betting_data = defaultdict(int)  # (count, bet) -> frequency
-            total_decisions = defaultdict(int)  # count -> total decisions
-            
-            # Process recent betting decisions
+            # Calculate betting distribution
+            recent_betting_data = defaultdict(int)
+            total_decisions = defaultdict(int)
             for stats in betting_stats_per_episode[-interval:]:
                 for count, bet in stats:
                     recent_betting_data[(count, bet)] += 1
                     total_decisions[count] += 1
             
-            # Convert frequencies to probabilities
             betting_distribution = {}
             for (count, bet), freq in recent_betting_data.items():
                 if total_decisions[count] > 0:
                     betting_distribution[(count, bet)] = freq / total_decisions[count]
             
             if not args.no_ui:
-                update_tk_ui(aggregated_action_data, betting_distribution, args)
+                update_ui_elements(aggregated_action_data, betting_distribution)
             
             if not args.quiet:
-                print(f"Episode {episode_counter} | Total Avg: {total_moving_avg:.2f} | "
-                      f"Recent Avg: {recent_avg:.2f} | Epsilon: {EPSILON_BET if phase == 0 else EPSILON_PLAY:.3f} | Best: {best_reward:.2f}")
+                print(f"Episode {episode_counter:,} | Total Avg: {total_moving_avg:.2f} | "
+                      f"Recent Avg: {recent_avg:.2f} | Epsilon: {EPSILON_BET if phase == 0 else EPSILON_PLAY:.3f} | "
+                      f"Best: {best_reward:.2f}")
             
             recent_rewards.clear()
         
-        # Automatically enable varied bets at specified episode
+        # Check for automatic varied bets enable
         if not varied_bets_enabled and episode_counter >= args.varied_bets_at:
-            EPSILON_BET = 0.3  # Reset epsilon to allow exploration
-            ui_data["varied_bets_episode"] = episode_counter
+            EPSILON_BET = 1.0  # Reset to 1.0 when varied bets are first enabled
             varied_bets_enabled = True
+            ui_data["varied_bets_episode"] = episode_counter
+            if not args.no_ui:
+                # Hide button and auto-enable label
+                varied_bets_button.pack_forget()
+                auto_enable_label.pack_forget()
+                # Show betting table
+                canvas_betting_table.pack(pady=10)
             if not args.quiet:
                 print(f"\nEnabling varied bets at episode {episode_counter}")
     
@@ -829,84 +854,134 @@ def train_agent(args):
     root.quit()
 
 def save_screenshot_and_summary():
-    # Force a final update of all UI elements
-    update_text()
-    draw_chart(canvas_chart, ui_data["episodes"], ui_data["total_avgs"], ui_data["recent_avgs"],
-               "Total Moving Avg", "Recent Avg")
-    draw_epsilon_chart(canvas_epsilon, ui_data["episodes"], ui_data["epsilons_play"], ui_data["epsilons_bet"])
-    draw_action_probability_table(canvas_action_table, aggregated_action_data)
+    global action_stats_per_episode, betting_stats_per_episode
     
-    # Force the window to update and wait a brief moment
-    root.update_idletasks()
-    root.update()
-    time.sleep(0.5)  # Wait half a second to ensure everything is rendered
-    
-    # Take the screenshot
-    x = root.winfo_rootx()
-    y = root.winfo_rooty()
-    w = root.winfo_width()
-    h = root.winfo_height()
-    bbox = (x, y, x + w, y + h)
-    screenshot = ImageGrab.grab(bbox)
-    
-    # Save screenshot and summary
-    now = datetime.now()
-    date_str = now.strftime("%m-%d")
-    time_str = now.strftime("%H-%M")
-    screenshot_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['recent_avg']:.2f}.png")
-    screenshot.save(screenshot_filename)
-    print(f"Saved screenshot: {screenshot_filename}")
-    
-    summary_filename = os.path.join(results_folder, f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['recent_avg']:.2f}.txt")
-    with open(summary_filename, "w") as f:
-        # Session Parameters
-        f.write("=== Training Session Parameters ===\n")
-        f.write(f"Date: {date_str}\n")
-        f.write(f"Time: {time_str}\n")
-        f.write(f"Alpha (Learning Rate): {ALPHA}\n")
-        f.write(f"Gamma (Discount Factor): {GAMMA}\n")
-        f.write(f"Epsilon Decay Rate: {EPSILON_DECAY}\n")
-        f.write(f"Final Epsilon: {EPSILON_BET:.6f}\n")
-        f.write(f"Rounds per Episode: {args.max_rounds}\n")
-        f.write(f"Total Episodes: {ui_data['episode']}\n\n")
+    # Create results folder if it doesn't exist
+    results_folder = 'results'
+    if not os.path.exists(results_folder):
+        os.makedirs(results_folder)
 
-        # Performance Metrics
-        f.write("=== Performance Metrics ===\n")
-        f.write(f"Total Moving Average: {ui_data['total_avg']:.2f}\n")
-        f.write(f"Recent Average: {ui_data['recent_avg']:.2f}\n")
-        f.write(f"Best Reward: {ui_data['best_reward']:.2f}\n")
-        lifetime_win_ratio = (ui_data["wins"] / (ui_data["wins"] + ui_data["losses"]) ) * 100
-        f.write(f"Lifetime Wins: {ui_data['wins']}\n")
-        f.write(f"Lifetime Losses: {ui_data['losses']}\n")
-        f.write(f"Lifetime Ties: {ui_data['ties']}\n")
-        f.write(f"Lifetime Win Ratio: {lifetime_win_ratio:.1f}%\n\n")
+    try:
+        # Calculate aggregated action data from recent episodes
+        interval = get_print_interval(ui_data['episode'])
+        aggregated_action_data = {}
+        
+        if action_stats_per_episode:
+            for ep_stats in action_stats_per_episode[-interval:]:
+                for hand_sum, counts in ep_stats.items():
+                    if hand_sum not in aggregated_action_data:
+                        aggregated_action_data[hand_sum] = [0, 0, 0, 0]
+                    for i in range(4):
+                        aggregated_action_data[hand_sum][i] += counts[i]
+        
+        # Collect betting distribution data
+        recent_betting_data = defaultdict(int)
+        total_decisions = defaultdict(int)
+        
+        if betting_stats_per_episode:
+            for stats in betting_stats_per_episode[-interval:]:
+                for count, bet in stats:
+                    recent_betting_data[(count, bet)] += 1
+                    total_decisions[count] += 1
+        
+        # Convert frequencies to probabilities
+        betting_distribution = {}
+        for (count, bet), freq in recent_betting_data.items():
+            if total_decisions[count] > 0:
+                betting_distribution[(count, bet)] = freq / total_decisions[count]
 
-        # Recent Performance
-        recent_wins = sum(1 for r in recent_rewards if r > 0)
-        recent_losses = sum(1 for r in recent_rewards if r < 0)
-        recent_total = recent_wins + recent_losses
-        recent_win_ratio = (recent_wins / recent_total * 100) if recent_total > 0 else 0
-        f.write("=== Recent Performance ===\n")
-        f.write(f"Recent Wins: {recent_wins}\n")
-        f.write(f"Recent Losses: {recent_losses}\n")
-        f.write(f"Recent Win Ratio: {recent_win_ratio:.1f}%\n\n")
+        # Multiple UI updates to ensure everything is rendered
+        for _ in range(4):
+            # Update UI with force_update=True for screenshot
+            update_ui_elements(aggregated_action_data, betting_distribution, force_update=True)
+            root.update_idletasks()
+            root.update()
+            time.sleep(0.5)  # Short wait between updates
+        
+        # Final update and longer wait
+        update_ui_elements(aggregated_action_data, betting_distribution, force_update=True)
+        root.update_idletasks()
+        root.update()
+        time.sleep(1.0)  # Longer wait before screenshot
+        
+        # Take the screenshot
+        x = root.winfo_rootx()
+        y = root.winfo_rooty()
+        w = root.winfo_width()
+        h = root.winfo_height()
+        bbox = (x, y, x + w, y + h)
+        screenshot = ImageGrab.grab(bbox)
+        
+        # Save screenshot and summary
+        now = datetime.now()
+        date_str = now.strftime("%m-%d")
+        time_str = now.strftime("%H-%M")
+        base_filename = f"{date_str}_{time_str}_{ui_data['episode']}_{ui_data['recent_avg']:.2f}"
+        
+        screenshot_filename = os.path.join(results_folder, f"{base_filename}.png")
+        screenshot.save(screenshot_filename)
+        print(f"Saved screenshot: {screenshot_filename}")
+        
+        summary_filename = os.path.join(results_folder, f"{base_filename}.txt")
+        with open(summary_filename, "w") as f:
+            # Session Parameters
+            f.write("=== Training Session Parameters ===\n")
+            f.write(f"Date: {date_str}\n")
+            f.write(f"Time: {time_str}\n")
+            f.write(f"Alpha (Learning Rate): {ALPHA}\n")
+            f.write(f"Gamma (Discount Factor): {GAMMA}\n")
+            f.write(f"Epsilon Decay Rate: {EPSILON_DECAY}\n")
+            f.write(f"Final Play Epsilon: {EPSILON_PLAY:.6f}\n")
+            f.write(f"Final Bet Epsilon: {EPSILON_BET:.6f}\n")
+            f.write(f"Initial Bankroll: {1000}\n")
+            f.write(f"Rounds per Episode: {args.max_rounds}\n")
+            f.write(f"Total Episodes: {ui_data['episode']:,}\n")
+            f.write(f"Varied Bets Start: {args.varied_bets_at:,}\n\n")
 
-        # Varied Bets Information
-        f.write("=== Betting Strategy ===\n")
-        if ui_data["varied_bets_episode"] is not None:
-            f.write(f"Varied Bets Enabled at Episode: {ui_data['varied_bets_episode']}\n")
-            f.write(f"Episodes with Varied Bets: {ui_data['episode'] - ui_data['varied_bets_episode']}\n")
-        else:
-            f.write("Varied Bets: Not Enabled\n")
+            # Performance Metrics
+            f.write("=== Performance Metrics ===\n")
+            f.write(f"Total Moving Average: {ui_data['total_avg']:.2f}\n")
+            f.write(f"Recent Average: {ui_data['recent_avg']:.2f}\n")
+            f.write(f"Best Reward: {ui_data['best_reward']:.2f}\n")
+            lifetime_win_ratio = (ui_data["wins"] / (ui_data["wins"] + ui_data["losses"]) ) * 100
+            f.write(f"Lifetime Wins: {ui_data['wins']:,}\n")
+            f.write(f"Lifetime Losses: {ui_data['losses']:,}\n")
+            f.write(f"Lifetime Ties: {ui_data['ties']:,}\n")
+            f.write(f"Lifetime Win Ratio: {lifetime_win_ratio:.1f}%\n\n")
 
-    print(f"Saved final summary: {summary_filename}")
+            # Recent Performance
+            recent_wins = sum(1 for r in recent_rewards if r > 0)
+            recent_losses = sum(1 for r in recent_rewards if r < 0)
+            recent_total = recent_wins + recent_losses
+            recent_win_ratio = (recent_wins / recent_total * 100) if recent_total > 0 else 0
+            f.write("=== Recent Performance ===\n")
+            f.write(f"Recent Wins: {recent_wins:,}\n")
+            f.write(f"Recent Losses: {recent_losses:,}\n")
+            f.write(f"Recent Win Ratio: {recent_win_ratio:.1f}%\n\n")
+
+            # Varied Bets Information
+            f.write("=== Betting Strategy ===\n")
+            if ui_data["varied_bets_episode"] is not None:
+                f.write(f"Varied Bets Enabled at Episode: {ui_data['varied_bets_episode']:,}\n")
+                f.write(f"Episodes with Varied Bets: {ui_data['episode'] - ui_data['varied_bets_episode']:,}\n")
+            else:
+                f.write("Varied Bets: Not Enabled\n")
+
+        print(f"Saved summary: {summary_filename}")
+    except Exception as e:
+        print(f"Error saving results: {str(e)}")
 
 def enable_varied_bets():
     global EPSILON_BET, varied_bets_enabled, args
     if not varied_bets_enabled:
-        EPSILON_BET = 1.0
+        EPSILON_BET = 1.0  # Set to 1.0 when manually enabled
         varied_bets_enabled = True
         ui_data["varied_bets_episode"] = ui_data["episode"]
+        # Hide button and auto-enable label
+        varied_bets_button.pack_forget()
+        auto_enable_label.pack_forget()
+        # Show betting table
+        canvas_betting_table.pack(pady=10)
         if not args.quiet:
             print(f"\nManually enabling varied bets at episode {ui_data['episode']}")
 

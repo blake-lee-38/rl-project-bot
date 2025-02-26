@@ -190,7 +190,7 @@ def possible_actions(phase: int, obs: dict = None):
 
 # Learning parameters
 ALPHA = 0.1             # Learning rate
-GAMMA = 0.95            # Discount factor
+GAMMA = 0.5             # Discount factor
 EPSILON_PLAY = 1.0      # Initial epsilon for playing decisions
 EPSILON_BET = 1.0       # Initial epsilon for betting decisions
 EPSILON_MIN = 0.01
@@ -202,6 +202,14 @@ Q_bet = defaultdict(lambda: np.zeros(10))   # For betting phase; 10 bet sizes
 
 def get_q(state: tuple, phase: int):
     if phase == 0:  # Betting phase
+        # Add count trend to state for betting decisions
+        count = state[2]  # Current count
+        if len(ui_data.get("episodes", [])) > 100:  # After some learning
+            # Look at count history to detect trends
+            count_trend = 1 if count > 0 else (-1 if count < 0 else 0)
+            state = state + (count_trend,)
+    
+    if phase == 0:
         if state not in Q_bet:
             Q_bet[state] = np.zeros(10)
         return Q_bet[state]
@@ -216,12 +224,23 @@ def choose_action(state: tuple, phase: int, epsilon: float, episode: int, obs: d
         if episode < args.varied_bets_at and not varied_bets_enabled:
             return 4  # Always bet 5 until varied_bets_at
         else:
-            # Use epsilon-greedy for betting decisions
-            if random.random() < EPSILON_BET:
-                return random.randint(0, 9)  # Random bet size 0-9 (maps to 1-10)
+            # Use epsilon-greedy with temperature scaling
+            if random.random() < epsilon:
+                # More intelligent exploration
+                count = state[2]
+                if count > 2:  # High positive count
+                    # Bias towards higher bets during exploration
+                    return random.randint(5, 9)  # Bet 6-10
+                elif count < -2:  # High negative count
+                    # Bias towards lower bets during exploration
+                    return random.randint(0, 4)  # Bet 1-5
+                else:
+                    return random.randint(0, 9)  # Random bet 1-10
             else:
                 q_vals = get_q(state, phase)
-                return int(np.argmax(q_vals))
+                # Add small random noise to break ties
+                noise = np.random.normal(0, 0.1, size=len(q_vals))
+                return int(np.argmax(q_vals + noise))
     else:  # Playing phase
         allowed = possible_actions(phase, obs)
         if random.random() < epsilon:
@@ -665,13 +684,33 @@ def update_ui_elements(aggregated_action_data=None, betting_distribution=None, f
         root.update()
         time.sleep(0.5)  # Wait for render
 
-def shape_reward(reward):
-    if reward > 0:
-        return reward * 2.0
-    elif reward < 0:
-        return reward * 0.5
-    else:
+def shape_reward(reward, phase, state=None, action=None):
+    """Shape rewards differently for betting and playing phases"""
+    if phase == 0:  # Betting phase
+        # Stronger reward shaping for betting decisions
+        if reward > 0:
+            return reward * 2.0  # Amplify wins
+        elif reward < 0:
+            return reward * 1.5  # Make losses more impactful
         return reward
+    else:  # Playing phase
+        shaped_r = reward
+        if state is not None and action is not None:
+            player_sum = state[0]
+            # Penalize obviously bad decisions
+            if action == 0:  # Hit
+                if player_sum >= 18:  # Hitting on 18 or higher
+                    shaped_r -= 1.0
+            elif action == 1:  # Stand
+                if player_sum <= 11:  # Standing on 11 or lower
+                    shaped_r -= 1.0
+        
+        # Apply standard reward shaping after penalties
+        if shaped_r > 0:
+            return shaped_r * 2.0
+        elif shaped_r < 0:
+            return shaped_r * 0.5
+        return shaped_r
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Q-Learning Agent for Blackjack')
@@ -695,7 +734,7 @@ def parse_args():
 
 def train_agent(args):
     global EPSILON_PLAY, EPSILON_BET, varied_bets_enabled
-    global action_stats_per_episode, betting_stats_per_episode  # Add global declaration
+    global action_stats_per_episode, betting_stats_per_episode
     
     env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=args.max_rounds)
     best_reward = -float('inf')
@@ -703,8 +742,8 @@ def train_agent(args):
     global recent_rewards
     recent_rewards.clear()
     episode_counter = 0
-    action_stats_per_episode = []  # Initialize here
-    betting_stats_per_episode = []  # Initialize here
+    action_stats_per_episode = []
+    betting_stats_per_episode = []
     
     # Reset epsilons at start of training
     EPSILON_PLAY = 1.0
@@ -727,16 +766,6 @@ def train_agent(args):
         episode_action_stats = {}
         episode_betting_stats = []
         
-        # Update epsilons with same decay rate
-        EPSILON_PLAY = max(EPSILON_PLAY * EPSILON_DECAY, EPSILON_MIN)
-        if varied_bets_enabled:  # Decay bet epsilon once betting is enabled
-            EPSILON_BET = max(EPSILON_BET * EPSILON_DECAY, EPSILON_MIN)
-        elif episode_counter >= args.varied_bets_at:  # Check for automatic trigger
-            EPSILON_BET = 1.0  # Reset to 1.0 when varied bets are first enabled
-            varied_bets_enabled = True
-            if not args.quiet:
-                print(f"\nEnabling varied bets at episode {episode_counter}")
-
         while not done:
             phase = obs["phase"]
             state = discretize_state(obs)
@@ -766,26 +795,59 @@ def train_agent(args):
                 max_next = np.max(q_next)
             else:
                 max_next = 0
-            shaped_r = shape_reward(reward)
+            
+            # Use phase-specific reward shaping with state and action
+            shaped_r = shape_reward(reward, phase, state, action)
             q_current[action] = q_current[action] + ALPHA * (shaped_r + GAMMA * max_next - q_current[action])
+            
             obs = next_obs
         
-        action_stats_per_episode.append(episode_action_stats)
-        betting_stats_per_episode.append(episode_betting_stats)
         episode_counter += 1
         recent_rewards.append(total_reward)
-        # Use all episodes since last UI update.
-        recent_avg = np.mean(recent_rewards) if recent_rewards else 0.0
-        total_moving_avg = (total_moving_avg * (episode_counter - 1) + total_reward) / episode_counter
-        best_reward = max(best_reward, total_reward)
         
+        # Update epsilons with same decay rate
+        EPSILON_PLAY = max(EPSILON_PLAY * EPSILON_DECAY, EPSILON_MIN)
+        if varied_bets_enabled:  # Decay bet epsilon once betting is enabled
+            EPSILON_BET = max(EPSILON_BET * EPSILON_DECAY, EPSILON_MIN)
+        elif episode_counter >= args.varied_bets_at:  # Check for automatic trigger
+            EPSILON_BET = 1.0  # Reset to 1.0 when varied bets are first enabled
+            varied_bets_enabled = True
+            ui_data["varied_bets_episode"] = episode_counter
+            if not args.no_ui:
+                # Hide button and auto-enable label
+                varied_bets_button.pack_forget()
+                auto_enable_label.pack_forget()
+                # Show betting table
+                canvas_betting_table.pack(pady=10)
+            if not args.quiet:
+                print(f"\nEnabling varied bets at episode {episode_counter}")
+        
+        # Record episode statistics
+        action_stats_per_episode.append(episode_action_stats)
+        betting_stats_per_episode.append(episode_betting_stats)
+        
+        # Update moving averages and best reward
+        if total_reward > best_reward:
+            best_reward = total_reward
+        
+        # Update total moving average
+        if episode_counter == 1:
+            total_moving_avg = total_reward
+        else:
+            total_moving_avg = total_moving_avg * 0.999 + total_reward * 0.001
+        
+        # Calculate recent average
+        recent_avg = sum(recent_rewards) / len(recent_rewards)
+        
+        # Update win/loss stats
         if total_reward > 0:
             ui_data["wins"] += 1
         elif total_reward < 0:
             ui_data["losses"] += 1
         else:
             ui_data["ties"] += 1
-        
+
+        # Only update UI at specified intervals
         interval = get_print_interval(episode_counter)
         if episode_counter % interval == 0:
             # Update UI data
@@ -834,20 +896,6 @@ def train_agent(args):
                       f"Best: {best_reward:.2f}")
             
             recent_rewards.clear()
-        
-        # Check for automatic varied bets enable
-        if not varied_bets_enabled and episode_counter >= args.varied_bets_at:
-            EPSILON_BET = 1.0  # Reset to 1.0 when varied bets are first enabled
-            varied_bets_enabled = True
-            ui_data["varied_bets_episode"] = episode_counter
-            if not args.no_ui:
-                # Hide button and auto-enable label
-                varied_bets_button.pack_forget()
-                auto_enable_label.pack_forget()
-                # Show betting table
-                canvas_betting_table.pack(pady=10)
-            if not args.quiet:
-                print(f"\nEnabling varied bets at episode {episode_counter}")
     
     if not args.quiet:
         print("Training complete.")

@@ -1,0 +1,6 @@
+Final Episode: 61000
+Total Moving Avg: -80.84
+Last 100 Avg: -37.05
+Epsilon: 0.010
+Best Reward: 515.00
+Global Wins: 17931  Losses: 42251

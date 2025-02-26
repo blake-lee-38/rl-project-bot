@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-
 Advanced Blackjack Environment
 
 This environment implements a blackjack game with the following features:
@@ -11,7 +10,7 @@ This environment implements a blackjack game with the following features:
       - Double Down: Only allowed on a 2‑card hand if available funds (bankroll minus committed bets) are sufficient; doubles the bet, draws one card, and ends that hand.
       - Split: Only allowed on a 2‑card hand if both cards have the same rank and available funds are sufficient; splits the hand into two hands.
   • Round Resolution: After all player hands are finished, the dealer plays. For each hand:
-      - Win: Outcome = +bet
+      - Win: Outcome = +bet (or +1.5×bet if the hand sums exactly to 21)
       - Tie: Outcome = 0
       - Loss (or bust): Outcome = –bet
     The bankroll is updated only at round resolution.
@@ -19,6 +18,11 @@ This environment implements a blackjack game with the following features:
 Cards are represented as tuples (suit, rank) where suit is one of 'C', 'D', 'H', 'S' and rank is one of:
   '2','3','4','5','6','7','8','9','T','J','Q','K','A'
 
+This version includes extra observation keys for the playing phase:
+  • can_double: True if a double-down move is allowed.
+  • can_split: True if a split move is allowed.
+  
+Additionally, if the player's hand sums exactly to 21 (and they win the round), the win is rewarded at 1.5× the bet.
 """
 
 import random
@@ -42,7 +46,7 @@ class AdvancedBlackjackEnv(gym.Env):
         self.max_rounds = max_rounds
         self.current_round = 0
 
-        # Build a standard deck: suits and ranks as in the provided image list.
+        # Build a standard deck.
         self.suits = ['C', 'D', 'H', 'S']
         self.ranks = ['2','3','4','5','6','7','8','9','T','J','Q','K','A']
         self.single_deck = [(s, r) for s in self.suits for r in self.ranks]
@@ -68,8 +72,6 @@ class AdvancedBlackjackEnv(gym.Env):
         self.max_bet = 10
         self.bet_action_space = spaces.Discrete(self.max_bet)  # actions 0-9 correspond to bet=action+1
         self.play_action_space = spaces.Discrete(4)  # 0: Hit, 1: Stick, 2: Double Down, 3: Split
-        
-        # For simplicity, we will not enforce a strict observation_space.
     
     def shuffle_shoe(self):
         """Construct and shuffle the shoe using num_decks decks."""
@@ -147,6 +149,7 @@ class AdvancedBlackjackEnv(gym.Env):
         Return an observation dictionary.
         'phase': 0 for betting, 1 for playing.
         In playing phase, current_hand is a list of card strings (e.g. "H2") for the current hand.
+        Additionally, two flags are added: 'can_double' and 'can_split'.
         """
         if self.phase == "bet":
             return {
@@ -163,7 +166,7 @@ class AdvancedBlackjackEnv(gym.Env):
         else:
             current_hand = self.player_hands[self.current_hand_index]["cards"]
             hand_strs = [card[0] + card[1] for card in current_hand]
-            return {
+            obs = {
                 "phase": 1,
                 "bankroll": self.bankroll,
                 "current_bet": self.player_hands[self.current_hand_index]["bet"],
@@ -174,6 +177,16 @@ class AdvancedBlackjackEnv(gym.Env):
                 "hand_index": self.current_hand_index,
                 "total_hands": len(self.player_hands)
             }
+            # Add flags for double down and split.
+            current_hand_data = self.player_hands[self.current_hand_index]
+            cards = current_hand_data["cards"]
+            can_double = (len(cards) == 2 and not current_hand_data["doubled"] and
+                          (self.bankroll - self.committed_bet() >= current_hand_data["bet"]))
+            can_split = (len(cards) == 2 and cards[0][1] == cards[1][1] and
+                         (self.bankroll - self.committed_bet() >= current_hand_data["bet"]))
+            obs["can_double"] = can_double
+            obs["can_split"] = can_split
+            return obs
     
     def _all_hands_finished(self) -> bool:
         """Return True if all player hands are finished."""
@@ -200,6 +213,8 @@ class AdvancedBlackjackEnv(gym.Env):
           - Else, if player's sum > dealer's sum: outcome = +bet
           - Else, if player's sum < dealer's sum: outcome = -bet
           - Tie: outcome = 0
+        Additionally, if the player's hand sums exactly to 21 (and they win), the outcome is
+        increased to 1.5× the bet.
         Update bankroll with the total outcome and return the round reward.
         """
         self._play_dealer()
@@ -220,8 +235,11 @@ class AdvancedBlackjackEnv(gym.Env):
                         outcome = -hand["bet"]
                     else:
                         outcome = 0
+                # Apply bonus: if player's hand sums exactly to 21 and outcome is a win, reward 1.5× bet.
+                if not self.is_bust(player_cards) and player_score == 21 and outcome > 0:
+                    outcome = hand["bet"] * 1.5
             total_reward += outcome
-            hand["outcome"] = outcome  # Store the outcome in the hand dictionary
+            hand["outcome"] = outcome
         self.bankroll += total_reward
         return total_reward
     
@@ -234,12 +252,10 @@ class AdvancedBlackjackEnv(gym.Env):
           - Then initial cards are dealt and phase transitions to "play".
         
         In Playing Phase (phase "play") for the current hand:
-          - 0: Hit – add a card; if bust, mark hand finished.
+          - 0: Hit – add a card.
           - 1: Stick – mark current hand as finished.
-          - 2: Double Down – if hand has exactly 2 cards and available funds (bankroll minus committed bets) are sufficient,
-                              double the bet, draw exactly one card, and mark hand finished.
-          - 3: Split – if hand has exactly 2 cards of the same rank and available funds are sufficient,
-                       split the hand into two hands (each with the original bet).
+          - 2: Double Down – if allowed, double the bet, draw one card, and finish the hand.
+          - 3: Split – if allowed, split the hand into two separate hands.
         
         After each action, if all player hands are finished, the dealer plays and the round is resolved.
         The round reward is returned (and bankroll is updated).
@@ -256,7 +272,6 @@ class AdvancedBlackjackEnv(gym.Env):
             self.player_hands[0]["bet"] = bet
             self.phase = "play"
             self.current_hand_index = 0
-            print(f"[BET] Player bets {bet}.")
             obs = self._get_obs()
             return obs, 0, done, False, info
 
@@ -269,73 +284,42 @@ class AdvancedBlackjackEnv(gym.Env):
 
             if action == 0:  # Hit
                 current_hand["cards"].append(self.draw_card())
-                print(f"[ACTION] Hand {self.current_hand_index+1}: Hit -> {current_hand['cards']}")
                 if self.is_bust(current_hand["cards"]):
                     current_hand["finished"] = True
-                    print(f"[RESULT] Hand {self.current_hand_index+1} busts with sum {self.sum_hand(current_hand['cards'])}.")
             elif action == 1:  # Stick
                 current_hand["finished"] = True
-                print(f"[ACTION] Hand {self.current_hand_index+1}: Stick with sum {self.sum_hand(current_hand['cards'])}.")
             elif action == 2:  # Double Down
-                if len(current_hand["cards"]) == 2 and not current_hand["doubled"]:
-                    available = self.bankroll - self.committed_bet()
-                    if available >= current_hand["bet"]:
-                        current_hand["doubled"] = True
-                        current_hand["bet"] *= 2
-                        current_hand["cards"].append(self.draw_card())
-                        current_hand["finished"] = True
-                        print(f"[ACTION] Hand {self.current_hand_index+1}: Double Down -> {current_hand['cards']} (Bet doubled to {current_hand['bet']}).")
-                    else:
-                        print(f"[WARN] Not enough funds to double down on hand {self.current_hand_index+1}. Action treated as Hit.")
-                        current_hand["cards"].append(self.draw_card())
-                        if self.is_bust(current_hand["cards"]):
-                            current_hand["finished"] = True
-                else:
-                    print(f"[WARN] Double Down not allowed on hand {self.current_hand_index+1}. Action treated as Hit.")
+                if self._get_obs().get("can_double", False):
+                    current_hand["doubled"] = True
+                    current_hand["bet"] *= 2
                     current_hand["cards"].append(self.draw_card())
-                    if self.is_bust(current_hand["cards"]):
-                        current_hand["finished"] = True
+                    current_hand["finished"] = True
+                else:
+                    pass  # Invalid move; do nothing.
             elif action == 3:  # Split
-                if len(current_hand["cards"]) == 2 and current_hand["cards"][0][1] == current_hand["cards"][1][1]:
-                    available = self.bankroll - self.committed_bet()
-                    if available >= current_hand["bet"]:
-                        card = current_hand["cards"][0]
-                        new_hand1 = {
-                            "cards": [card, self.draw_card()],
-                            "bet": current_hand["bet"],
-                            "doubled": False,
-                            "finished": False
-                        }
-                        new_hand2 = {
-                            "cards": [current_hand["cards"][1], self.draw_card()],
-                            "bet": current_hand["bet"],
-                            "doubled": False,
-                            "finished": False
-                        }
-                        self.player_hands[self.current_hand_index] = new_hand1
-                        self.player_hands.insert(self.current_hand_index + 1, new_hand2)
-                        print(f"[ACTION] Hand {self.current_hand_index+1}: Split into two hands.")
-                    else:
-                        print(f"[WARN] Not enough funds to split hand {self.current_hand_index+1}. Action treated as Hit.")
-                        current_hand["cards"].append(self.draw_card())
-                        if self.is_bust(current_hand["cards"]):
-                            current_hand["finished"] = True
+                if self._get_obs().get("can_split", False):
+                    card = current_hand["cards"][0]
+                    new_hand1 = {
+                        "cards": [card, self.draw_card()],
+                        "bet": current_hand["bet"],
+                        "doubled": False,
+                        "finished": False
+                    }
+                    new_hand2 = {
+                        "cards": [current_hand["cards"][1], self.draw_card()],
+                        "bet": current_hand["bet"],
+                        "doubled": False,
+                        "finished": False
+                    }
+                    self.player_hands[self.current_hand_index] = new_hand1
+                    self.player_hands.insert(self.current_hand_index + 1, new_hand2)
                 else:
-                    print(f"[WARN] Split not allowed on hand {self.current_hand_index+1}. Action treated as Hit.")
-                    current_hand["cards"].append(self.draw_card())
-                    if self.is_bust(current_hand["cards"]):
-                        current_hand["finished"] = True
+                    pass  # Invalid move; do nothing.
 
             if self._all_hands_finished():
                 round_reward = self._resolve_round()
                 reward += round_reward
                 self.current_round += 1
-                print(f"[ROUND RESOLUTION] Dealer's hand: {[card[0]+card[1] for card in self.dealer]} (Sum: {self.sum_hand(self.dealer)})")
-                for idx, hand in enumerate(self.player_hands):
-                    hand_str = " ".join([c[0]+c[1] for c in hand["cards"]])
-                    outcome_str = 'Win' if hand["outcome"] > 0 else 'Loss' if hand["outcome"] < 0 else 'Tie'
-                    print(f"[ROUND RESOLUTION] Player Hand {idx+1}: {hand_str} -> Bet: {hand['bet']} Outcome: {outcome_str}")
-                print(f"[ROUND RESOLUTION] Round reward: {round_reward}, New bankroll: {self.bankroll}")
                 info["round_reward"] = round_reward
                 info["dealer_hand"] = [card[0] + card[1] for card in self.dealer]
                 self.phase = "bet"
@@ -350,7 +334,6 @@ class AdvancedBlackjackEnv(gym.Env):
         return obs, reward, done, False, info
 
     def render(self, mode: Optional[str] = None):
-        """Render a textual representation of the game state."""
         if self.render_mode == "human":
             print("-----")
             print(f"Round: {self.current_round+1}/{self.max_rounds} | Bankroll: {self.bankroll}")

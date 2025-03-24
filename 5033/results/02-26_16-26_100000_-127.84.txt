@@ -1,0 +1,30 @@
+=== Training Session Parameters ===
+Date: 02-26
+Time: 16-26
+Alpha (Learning Rate): 0.1
+Gamma (Discount Factor): 0.95
+Epsilon Decay Rate: 0.99975
+Final Play Epsilon: 0.010000
+Final Bet Epsilon: 0.010000
+Initial Bankroll: 1000
+Rounds per Episode: 100
+Total Episodes: 100,000
+Varied Bets Start: 25,000
+
+=== Performance Metrics ===
+Total Moving Average: -132.56
+Recent Average: -127.84
+Best Reward: 1611.00
+Lifetime Wins: 32,188
+Lifetime Losses: 67,526
+Lifetime Ties: 286
+Lifetime Win Ratio: 32.3%
+
+=== Recent Performance ===
+Recent Wins: 0
+Recent Losses: 0
+Recent Win Ratio: 0.0%
+
+=== Betting Strategy ===
+Varied Bets Enabled at Episode: 25,000
+Episodes with Varied Bets: 75,000

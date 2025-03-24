@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-train_qlearning_agent.py
+train_td_agent.py
 
-This script trains a Q-Learning agent (with card counting) using our AdvancedBlackjackEnv.
-  - The training loop runs indefinitely until manually stopped (or until a specified episode count).
-  - A Pause/Play button and a Stop button are provided in the Tkinter UI.
-  - UI updates (charts, stats, tables) occur at defined episode intervals.
-  - When training stops (via the Stop button or when episodes complete), a screenshot and summary are saved.
-  - After training ends, the final trained agent is evaluated over 1,000 new episodes (each with 100 rounds).
-    The evaluation reports the average money won (or lost) per episode and the percentage of episodes that were profitable.
+This script trains a TD(λ) agent (using eligibility traces with a SARSA(λ)-style update and card counting) using our AdvancedBlackjackEnv.
+  - After training stops, the final trained agent is evaluated over 1,000 new episodes (each with 100 rounds)
+    using its own learned playing policy (for both betting and playing phases).
+  - The evaluation reports the average money won (or lost) per episode as well as the percentage of episodes
+    that were profitable. Only the final evaluation summary is printed.
+  - Eligibility traces are used for updating Q-values with the update rule:
+      δ = r_shaped + γ * Q(s', a') − Q(s, a)
+      e(s, a) ← e(s, a) + 1
+      Q(s, a) ← Q(s, a) + α · δ · e(s, a)   and   e(s, a) ← γλ · e(s, a)
 """
 
 import random
@@ -24,15 +26,15 @@ import argparse
 
 from advanced_blackjack_env import AdvancedBlackjackEnv
 
-# --- Updated Evaluation Function (Money Metrics for Agent Only) ---
+# --- Evaluation Function (Money Metrics for Agent Only) ---
 def evaluate_money(num_episodes=1000):
     """
-    Runs evaluation for num_episodes (each with 100 rounds) and computes the total reward (money won or lost)
-    per episode. For phase 0 the learned betting policy is always used; for phase 1 the agent's learned playing
-    policy is used.
-    
-    Prints only the final summary (average reward per episode and the percentage of profitable episodes).
-    
+    Runs evaluation for num_episodes (each with 100 rounds) and computes the total reward per episode.
+    For phase 0 the learned betting policy is used and for phase 1 the agent's learned playing policy is used.
+    Prints only the final summary results:
+      - Average reward per episode.
+      - Percentage of episodes that were profitable.
+      
     Returns a tuple: (avg_reward, profitable_count, non_profitable_count)
     """
     env = AdvancedBlackjackEnv(render_mode=None, natural=True, initial_bankroll=1000, max_rounds=args.max_rounds)
@@ -53,13 +55,13 @@ def evaluate_money(num_episodes=1000):
             obs, reward, done, _, _ = env.step(action)
             episode_reward += reward
         total_rewards.append(episode_reward)
-        # Do not print per episode during evaluation.
+        if episode_reward > 0:
+            profitable_count += 1
     avg_reward = sum(total_rewards) / num_episodes
     print(f"\nEvaluation (Agent Policy) over {num_episodes} episodes:")
     print(f"Average Reward per Episode: {avg_reward:.2f}")
-    profitable = sum(1 for r in total_rewards if r > 0)
-    print(f"Profitable Episodes: {profitable} out of {num_episodes} ({profitable/num_episodes*100:.1f}%)")
-    return avg_reward, profitable, num_episodes - profitable
+    print(f"Profitable Episodes: {profitable_count} out of {num_episodes} ({profitable_count/num_episodes*100:.1f}%)")
+    return avg_reward, profitable_count, num_episodes - profitable_count
 
 # --- Global UI Elements and Flags ---
 header_label = None
@@ -85,19 +87,15 @@ def create_ui(args):
     top_frame.grid(row=0, column=0, sticky="ew", pady=(0,10))
     top_frame.grid_columnconfigure(0, weight=1)
     top_frame.grid_columnconfigure(1, weight=1)
-    
     episode_frame = tk.Frame(top_frame)
     episode_frame.grid(row=0, column=0, sticky="w")
     header_label = tk.Label(episode_frame, text="Episode: 0", font=("Helvetica",12,"bold"), justify=tk.LEFT)
     header_label.pack(anchor="w")
-    
     if args.episodes:
         max_ep_label = tk.Label(episode_frame, text=f"Max Episodes: {args.episodes:,}", font=("Helvetica",10), justify=tk.LEFT)
         max_ep_label.pack(anchor="w")
-    
     control_frame = tk.Frame(top_frame)
     control_frame.grid(row=0, column=1, sticky="e")
-    
     def toggle_pause():
         if pause_event.is_set():
             pause_event.clear()
@@ -107,7 +105,6 @@ def create_ui(args):
             pause_button.config(text="Start")
     pause_button = tk.Button(control_frame, text="Pause", command=toggle_pause)
     pause_button.pack(side=tk.LEFT, padx=5)
-    
     def stop_training():
         stop_event.set()
         save_screenshot_and_summary()
@@ -117,42 +114,30 @@ def create_ui(args):
         root.quit()
     stop_button = tk.Button(control_frame, text="Stop", command=stop_training)
     stop_button.pack(side=tk.LEFT, padx=5)
-    
     epsilon_frame = tk.Frame(top_frame)
     epsilon_frame.grid(row=1, column=0, sticky="w", pady=(5,0))
     epsilon_label = tk.Label(epsilon_frame, text="Play ε: 1.000  |  Bet ε: 0.000", font=("Helvetica",10))
     epsilon_label.pack(anchor="w")
-    
     spacer_frame = tk.Frame(top_frame)
     spacer_frame.grid(row=1, column=1)
-    
     stats_labels_frame = tk.Frame(stats_frame)
     stats_labels_frame.grid(row=1, column=0, sticky="w", pady=(0,10))
-    
     left_stats_label = tk.Label(stats_labels_frame, text="", font=("Helvetica",10), justify=tk.LEFT)
     left_stats_label.grid(row=0, column=0, padx=20)
-    
     right_stats_label = tk.Label(stats_labels_frame, text="", font=("Helvetica",10), justify=tk.LEFT)
     right_stats_label.grid(row=0, column=1, padx=20)
-    
     canvas_chart = tk.Canvas(charts_frame, width=760, height=300, bg="white")
     canvas_chart.pack(pady=10)
-    
     canvas_epsilon = tk.Canvas(charts_frame, width=760, height=300, bg="white")
     canvas_epsilon.pack(pady=10)
-    
     canvas_action_table = tk.Canvas(right_frame, width=760, height=400, bg="white")
     canvas_action_table.pack(pady=10)
-    
     betting_frame = tk.Frame(right_frame)
     betting_frame.pack(pady=10, padx=10)
-    
     varied_bets_button = tk.Button(betting_frame, text="Enable Varied Betting", command=enable_varied_bets, width=30, height=2)
     varied_bets_button.pack(pady=(20,5))
-    
     auto_enable_label = tk.Label(betting_frame, text=f"Will auto-enable at episode {args.varied_bets_at:,}", font=("Helvetica",9))
     auto_enable_label.pack(pady=(0,20))
-    
     canvas_betting_table = tk.Canvas(betting_frame, width=760, height=400, bg="white")
     canvas_betting_table.pack(pady=10)
 
@@ -257,7 +242,7 @@ if not os.path.exists(results_folder):
     os.makedirs(results_folder)
 
 root = tk.Tk()
-root.title("Q-Learning Training Progress")
+root.title("TD(λ) Training Progress")
 
 window_width = 1650
 window_height = 900
@@ -571,6 +556,8 @@ def parse_args():
     parser.add_argument('--quiet', action='store_true', help='Disable console output')
     parser.add_argument('--max-rounds', type=int, default=100, help='Number of rounds per episode (default: 100)')
     parser.add_argument('--varied-bets-at', type=int, default=25000, help='Episode number to enable varied bets (default: 25000)')
+    # TD(λ) parameter:
+    parser.add_argument('--lambda', type=float, dest='lmbda', default=0.9, help='Eligibility trace decay rate (default: 0.9)')
     return parser.parse_args()
 
 def train_agent(args):
@@ -584,9 +571,12 @@ def train_agent(args):
     episode_counter = 0
     action_stats_per_episode = []
     betting_stats_per_episode = []
+    
     EPSILON_PLAY = 1.0
     EPSILON_BET = 0.0
     varied_bets_enabled = False
+    
+    # TD(λ) training loop with eligibility traces:
     while not stop_event.is_set():
         if args.episodes and episode_counter >= args.episodes:
             stop_event.set()
@@ -595,6 +585,8 @@ def train_agent(args):
         while pause_event.is_set() and not stop_event.is_set():
             time.sleep(0.1)
         obs, _ = env.reset()
+        E_bet = defaultdict(lambda: np.zeros(10))
+        E_play = defaultdict(lambda: np.zeros(4))
         total_reward = 0
         done = False
         episode_action_stats = {}
@@ -614,22 +606,30 @@ def train_agent(args):
                 count = state[2]
                 episode_betting_stats.append((count, action))
             total_reward += reward
-            next_state = discretize_state(next_obs)
-            q_current = get_q(state, phase)
-            if not done:
-                next_phase = next_obs["phase"]
-                q_next = get_q(next_state, next_phase)
-                max_next = np.max(q_next)
-            else:
-                max_next = 0
             shaped_r = shape_reward(reward, phase, state, action)
-            q_current[action] = q_current[action] + ALPHA*(shaped_r + GAMMA*max_next - q_current[action])
+            if not done and next_obs["phase"] == phase:
+                next_state = discretize_state(next_obs)
+                next_action = choose_action(next_state, phase, epsilon, episode_counter, next_obs)
+                td_target = shaped_r + GAMMA * get_q(next_state, phase)[next_action]
+            else:
+                td_target = shaped_r
+            delta = td_target - get_q(state, phase)[action]
+            if phase == 0:
+                E_bet[state][action] += 1
+                for s in list(E_bet.keys()):
+                    Q_bet[s] += ALPHA * delta * E_bet[s]
+                    E_bet[s] *= GAMMA * args.lmbda
+            else:
+                E_play[state][action] += 1
+                for s in list(E_play.keys()):
+                    Q_play[s] += ALPHA * delta * E_play[s]
+                    E_play[s] *= GAMMA * args.lmbda
             obs = next_obs
         episode_counter += 1
         recent_rewards.append(total_reward)
-        EPSILON_PLAY = max(EPSILON_PLAY*EPSILON_DECAY, EPSILON_MIN)
+        EPSILON_PLAY = max(EPSILON_PLAY * EPSILON_DECAY, EPSILON_MIN)
         if varied_bets_enabled:
-            EPSILON_BET = max(EPSILON_BET*EPSILON_DECAY, EPSILON_MIN)
+            EPSILON_BET = max(EPSILON_BET * EPSILON_DECAY, EPSILON_MIN)
         elif episode_counter >= args.varied_bets_at:
             EPSILON_BET = 1.0
             varied_bets_enabled = True
@@ -644,21 +644,21 @@ def train_agent(args):
         betting_stats_per_episode.append(episode_betting_stats)
         if total_reward > best_reward:
             best_reward = total_reward
-        if episode_counter==1:
+        if episode_counter == 1:
             total_moving_avg = total_reward
         else:
-            total_moving_avg = total_moving_avg*0.999 + total_reward*0.001
-        recent_avg = sum(recent_rewards)/len(recent_rewards)
+            total_moving_avg = total_moving_avg * 0.999 + total_reward * 0.001
+        recent_avg = sum(recent_rewards) / len(recent_rewards)
         if total_reward > 0:
             ui_data["wins"] += 1
         elif total_reward < 0:
             ui_data["losses"] += 1
         else:
             ui_data["ties"] += 1
-        recent_wins = sum(1 for r in recent_rewards if r>0)
-        recent_losses = sum(1 for r in recent_rewards if r<0)
-        recent_total = recent_wins+recent_losses
-        recent_win_ratio = (recent_wins/recent_total*100) if recent_total>0 else 0
+        recent_wins = sum(1 for r in recent_rewards if r > 0)
+        recent_losses = sum(1 for r in recent_rewards if r < 0)
+        recent_total = recent_wins + recent_losses
+        recent_win_ratio = (recent_wins / recent_total * 100) if recent_total > 0 else 0
         ui_data["last_recent_wins"] = recent_wins
         ui_data["last_recent_losses"] = recent_losses
         ui_data["last_recent_win_ratio"] = recent_win_ratio
@@ -697,7 +697,7 @@ def train_agent(args):
             if not args.no_ui:
                 update_ui_elements(aggregated_action_data, betting_distribution)
             if not args.quiet:
-                current_epsilon = EPSILON_BET if phase==0 else EPSILON_PLAY
+                current_epsilon = EPSILON_BET if phase == 0 else EPSILON_PLAY
                 print(f"Episode {episode_counter:,} | Total Avg: {total_moving_avg:.2f} | Recent Avg: {recent_avg:.2f} | Epsilon: {current_epsilon:.3f} | Best: {best_reward:.2f}")
             recent_rewards.clear()
         if not args.quiet:
